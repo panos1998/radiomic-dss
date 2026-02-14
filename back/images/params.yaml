@@ -1,0 +1,17 @@
+imageType:
+  Original: {}
+  # Wavelet: {}
+
+featureClass:
+  gldm:
+    - HighGrayLevelEmphasis
+  
+setting:
+  binWidth: 25
+  force2D: true
+  # resampledPixelSpacing: [1, 1, 1]  # 2D spacing for 2D images
+# voxelSetting:
+#   kernelRadius: 2
+#   maskedKernel: true
+#   initValue: 0
+#   voxelBatch: 5000

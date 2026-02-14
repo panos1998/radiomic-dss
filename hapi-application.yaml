@@ -1,0 +1,37 @@
+spring:
+  datasource:
+    url: 'jdbc:postgresql://postgres:5432/hapiuser'
+    username: hapiuser
+    password: example_pw
+    driverClassName: org.postgresql.Driver
+  jpa:
+    properties:
+      hibernate.format_sql: false
+      hibernate.show_sql: false
+      hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
+      hibernate.search.enabled: false
+
+hapi:
+  fhir:
+    fhir_version: R4
+    narrative_enabled: true
+    mdm_enabled: false
+    allow_schema_update: true
+    allow_multiple_delete: false
+    allow_external_references: false
+    
+    cors:
+      allow_Credentials: true
+      allowed_origin:
+        - '*'
+
+    search-coord-core-pool-size: 20
+    search-coord-max-pool-size: 100
+    search-coord-queue-capacity: 200
+
+    tester:
+      home:
+        name: Local Tester
+        server_address: 'http://localhost:8080/fhir'
+        refuse_to_fetch_third_party_urls: false
+        fhir_version: R4

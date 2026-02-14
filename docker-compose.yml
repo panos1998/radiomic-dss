@@ -1,0 +1,87 @@
+version: "3.8"
+
+services:
+  # ... (Your existing services remain unchanged) ...
+
+  pyradiomics-api:
+    build:
+      context: ./back
+      dockerfile: pyradiomics-api.Dockerfile
+    image: radiomic-pyradiomics-api:latest
+    volumes:
+      - ./back/images:/images
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  back:
+    build:
+      context: ./back
+      dockerfile: Dockerfile
+    image: radiomic-back:latest
+    pull_policy: never
+    environment:
+      PYRADIO_MODE: ${PYRADIO_MODE:-api}
+      PYRADIO_CONTAINER: ${PYRADIO_CONTAINER:-pyradiomics}
+      PYRADIO_API_URL: ${PYRADIO_API_URL:-http://pyradiomics-api:8001/run}
+      PYRADIO_API_TIMEOUT: ${PYRADIO_API_TIMEOUT:-120}
+      FHIR_URL: ${FHIR_URL:-http://fhir-hapi:8080/fhir}
+    volumes:
+      - ./back:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app"
+    depends_on:
+      - pyradiomics-api
+      - postgres
+      - fhir-hapi
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: hapiuser
+      POSTGRES_USER: hapiuser
+      POSTGRES_PASSWORD: example_pw
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hapiuser"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  fhir-hapi:
+    image: hapiproject/hapi:v7.2.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./hapi-application.yaml:/app/config/application.yaml
+      - hapi-data:/data/hapi
+    restart: unless-stopped
+
+  # --- NEW SERVICE ---
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    # Points to your 'back' service on port 8000
+    command: http back:8000
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+      command: http --domain=unblossomed-tari-lightsomely.ngrok-free.dev back:8000
+    ports:
+      - "4040:4040"
+    depends_on:
+      - back
+
+volumes:
+  hapi-data:
+  postgres-data:
