@@ -1,8 +1,7 @@
+# Docker Compose for Production
 version: "3.8"
 
 services:
-  # ... (Your existing services remain unchanged) ...
-
   pyradiomics-api:
     build:
       context: ./back
@@ -34,7 +33,7 @@ services:
     ports:
       - "8000:8000"
     command: >
-      sh -c "uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app"
+      sh -c "uvicorn main:app --host 0.0.0.0 --port 8000"
     depends_on:
       - pyradiomics-api
       - postgres
@@ -69,11 +68,9 @@ services:
       - hapi-data:/data/hapi
     restart: unless-stopped
 
-  # --- NEW SERVICE ---
   ngrok:
     image: ngrok/ngrok:latest
     restart: unless-stopped
-    # Points to your 'back' service on port 8000
     command: http back:8000
     environment:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}

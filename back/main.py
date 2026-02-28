@@ -1,9 +1,12 @@
 from typing import Tuple, Union, Any
-from fastapi import FastAPI
+
+from requests import get
+from fastapi import FastAPI, Form
 from fastapi.staticfiles import StaticFiles
 import httpx
 import json as _json
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 try:
     import requests_unixsocket  # for Docker API via /var/run/docker.sock
     import requests as _requests
@@ -19,9 +22,19 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 images_dir = os.path.join(os.path.dirname(__file__), "images")
 app.mount("/images", StaticFiles(directory=images_dir), name="images")
 
-FHIR_URL = os.getenv("FHIR_URL", "http://fhir-hapi:8080/fhir")
+FHIR_URL = os.getenv("FHIR_URL", "http://localhost:8080/fhir")
 client = httpx.Client(timeout=300.0)  # 60 seconds
+origins = [
+    "https://4200-firebase-pancreas-dss-1770494409240.cluster-cbeiita7rbe7iuwhvjs5zww2i4.cloudworkstations.dev"
+]
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Only allows requests from this specific URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],    # Still needed for the ngrok-skip-browser-warning header
+)
 # Utilities to run commands inside the pyradiomics container via Docker API
 def _docker_session():
     if requests_unixsocket is None:
@@ -111,14 +124,51 @@ async def read_root() -> Union[dict, str]:
 
     return {"message": "Hello, World!" + os.getenv("FHIR_URL")}
 
-@app.post("/assessment/")
-async def createAssessment(data: dict) -> dict:
-    # use the incoming data to avoid unused-parameter warnings and echo it back
-    return {"message": "Assessment created successfully.", "data_received": data}
+import httpx
 
-@app.get("/patients/")
+@app.get("/patients")
 async def getPatients() -> dict:
-    return {"patients skatoules": []}
+    print("Fetching ALL patients from FHIR server at:", FHIR_URL)
+    
+    all_patients = []
+    next_url = f"{FHIR_URL}/Patient"
+    
+    try:
+        # extend timeout since fetching all pages might take time
+        timeout = httpx.Timeout(300.0) 
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            while next_url:
+                print(f"Fetching page: {next_url}")
+                response = await client.get(next_url)
+                
+                if response.status_code != 200:
+                    print(f"Error fetching page: {response.status_code}")
+                    break
+                
+                data = response.json()
+                
+                # 1. Extract patients from the current page's 'entry' list
+                #    We grab 'resource' to get the actual Patient object, skipping the wrapper
+                if "entry" in data:
+                    entries = data["entry"]
+                    for entry in entries:
+                        if "resource" in entry:
+                            all_patients.append(entry["resource"])
+                
+                # 2. Find the 'next' link for pagination
+                next_url = None
+                links = data.get("link", [])
+                for link in links:
+                    if link.get("relation") == "next":
+                        next_url = link.get("url")
+                        break
+                        
+    except Exception as e:
+        return {"error": f"Failed to fetch patients: {e}"}
+
+    print(f"Total patients fetched: {len(all_patients)}")
+    return {"patients": all_patients}
 async def log_request(request):
     print(f"Request event hook: {request.method} {request.url} - Waiting for response")
     print("Headers:", request.headers)
@@ -132,12 +182,12 @@ async def add_patient():
         "name": [
             {
                 "use": "official",
-                "family": "Davies",
-                "given": ["Curties"]
+                "family": "Beverly",
+                "given": ["Patrick"]
             }
         ],
         "gender": "male",
-        "birthDate": "1973-01-01"
+        "birthDate": "1965-01-01"
     }
     print(patient_resource)
     print("AINTE REEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
@@ -150,7 +200,7 @@ async def add_patient():
             return {"error": "Failed to create patient", "status_code": response.status_code, "details": response.text}
 
 import os
-from fastapi import UploadFile, File, HTTPException
+from fastapi import UploadFile, File, HTTPException, Body
 import json
 from typing import Optional
 
@@ -229,40 +279,31 @@ def build_model(img_size: Tuple[int, int], channels: int = 1) -> Any:
 def _load_weights_grayscale(model, model_path: str) -> None:
     """
     Load weights for a grayscale (1-channel) model.
-    If the weights were trained on RGB, adapt the first conv layer by averaging channels.
     """
     if tf is None:
         raise RuntimeError("TensorFlow is required to load weights; install tensorflow.")
-
     try:
         model.load_weights(model_path)
         return
-    except Exception:
-        pass
-
-    # Fallback: load weights into a 3-channel model and adapt the first conv kernel
-    rgb_model = build_model((128, 128), channels=3)
-    rgb_model.load_weights(model_path)
-
-    rgb_layers = {layer.name: layer for layer in rgb_model.layers}
-    for layer in model.layers:
-        if not layer.weights:
-            continue
-        rgb_layer = rgb_layers.get(layer.name)
-        if rgb_layer is None or not rgb_layer.weights:
-            continue
-
-        rgb_weights = rgb_layer.get_weights()
-        if not rgb_weights:
-            continue
-
-        # Adapt only the first Conv2D kernel if needed (from 3 channels to 1)
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            kernel = rgb_weights[0]
-            if kernel.ndim == 4 and kernel.shape[2] == 3 and layer.input_shape[-1] == 1:
-                rgb_weights[0] = kernel.mean(axis=2, keepdims=True)
-
-        layer.set_weights(rgb_weights)
+    except ValueError:
+        # If weights were trained on RGB, adapt first conv kernel by averaging channels
+        rgb_model = build_model((128, 128), channels=3)
+        rgb_model.load_weights(model_path)
+        rgb_layers = {layer.name: layer for layer in rgb_model.layers}
+        for layer in model.layers:
+            if not layer.weights:
+                continue
+            rgb_layer = rgb_layers.get(layer.name)
+            if rgb_layer is None or not rgb_layer.weights:
+                continue
+            rgb_weights = rgb_layer.get_weights()
+            if not rgb_weights:
+                continue
+            if isinstance(layer, tf.keras.layers.Conv2D):
+                kernel = rgb_weights[0]
+                if kernel.ndim == 4 and kernel.shape[2] == 3 and layer.input_shape[-1] == 1:
+                    rgb_weights[0] = kernel.mean(axis=2, keepdims=True)
+            layer.set_weights(rgb_weights)
 
 
 def preprocess_image(image_path):
@@ -294,7 +335,38 @@ def infer_with_cnn(img_array, model_path):
     probability = float(prediction[0][0])
     print(f"Inference probability: {probability}")
     return model, probability
+async def async_check_input_validity(image_bytes):
+    print("Checking input validity with Gemini SDK...")
+    if genai is None or genai_types is None or not os.getenv("GEMINI_API_KEY"):
+        return {"explanation": "Gemini SDK not configured (set GEMINI_API_KEY and install google-genai)."}
 
+    try:
+        client = genai.Client()
+        model_name = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+        prompt = os.getenv("GEMINI_PROMPT", "You are working in a hospital as a screener. You are given from the doctor a 2D CT slice image and you have to check if the image is actual a CT or irrelevant. If the image is a CT slice you answer 'valid', if the image is not a CT slice you answer 'invalid'.Answer with just one word, either 'valid' or 'invalid'.")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                prompt,
+                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+            ],
+        )
+        print("Gemini SDK response:", response)
+        # Try to extract the text field from the response (Gemini SDK may return .text or .candidates[0].content.parts[0].text)
+        text = getattr(response, "text", None)
+        if not text and hasattr(response, "candidates") and response.candidates:
+            # Try to extract from candidates
+            candidate = response.candidates[0]
+            if hasattr(candidate, "content") and hasattr(candidate.content, "parts") and candidate.content.parts:
+                part = candidate.content.parts[0]
+                text = getattr(part, "text", None)
+        if not text:
+            text = str(response)
+        text = (text or "").strip().lower()
+        validity = "valid" if "valid" in text and "invalid" not in text else "invalid"
+        return {"validity": validity, "gemini_response": text}
+    except Exception as e:
+        return {"validity": "error", "gemini_response": f"Failed to contact Gemini SDK: {e}"}
 def calculate_gradcam(model, img_array, class_index):
     """
     Apply GradCAM using the last Conv2D activations and return the overlay only.
@@ -462,11 +534,14 @@ def _resolve_model_path() -> str:
     # Fall back to repo-root resolution
     return candidates[0]
 
-
+def uuid4() -> str:
+    """Generate a random UUID4 string."""
+    import uuid
+    return str(uuid.uuid4())
 def _save_gradcam_image(gradcam_img, original_filename: str, suffix: str = "") -> Tuple[str, str]:
     base_stem = os.path.splitext(original_filename)[0]
     name_suffix = f"_{suffix}" if suffix else ""
-    gradcam_filename = f"gradcam_{base_stem}{name_suffix}.png"
+    gradcam_filename = f"gradcam_{uuid4()}.png"
     gradcam_path = os.path.join(images_dir, gradcam_filename)
     cv2.imwrite(gradcam_path, gradcam_img)
     return gradcam_filename, gradcam_path
@@ -480,9 +555,13 @@ def _ensure_radiomics_output_dir(base_stem: str) -> Tuple[str, str]:
 
 
 def _cleanup_paths(*paths: str) -> None:
+    import shutil
     for path in paths:
         try:
-            os.remove(path)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
         except PermissionError:
             pass
         except FileNotFoundError:
@@ -545,12 +624,25 @@ def prepare_fhir_observation(probability, gradcam_path, radiomic_features, expla
 @app.post("/gemini/assessment/")
 async def gemini_assessment(
     image_file: UploadFile = File(...),
+    patient_id: str = Form(...)
 ) -> dict:
     """
     Processes a raw CT slice and mask: extracts radiomic features using PyRadiomics container, resizes, infers with CNN,
     applies GradCAM, stores GradCAM image, calls Gemini for explanation, stores assessment as FHIR Observation.
     """
+    # Read image bytes directly from UploadFile
+    image_bytes = await image_file.read()
+    print("request t gemini on truck")
+    validity_check = await async_check_input_validity(image_bytes)
+    print("Gemini validity check:", validity_check)
+    print("Gemini response text:", validity_check.get("gemini_response"))
+    if validity_check.get("validity") == "invalid":
+        # _cleanup_paths(image_file.file)  # ensure file is closed and cleaned up
+        return {"error": "Uploaded image is not a valid CT slice.", "gemini_response": validity_check.get("gemini_response")}
+    # Reset file pointer for further use
+    image_file.file.seek(0)
     temp_image_path = await _save_upload_to_images_dir(image_file)
+
     # Ensure mask is full-image labelmap (all ones) created internally
     base_img = _prepare_mask_image(temp_image_path)
 
@@ -562,7 +654,7 @@ async def gemini_assessment(
         nrrd_image_path,
         nrrd_mask_path,
     ) = _write_nrrd_pair(base_img, base_stem)
-
+    print(f"Saved NRRD image to {nrrd_image_path} and mask to {nrrd_mask_path}")
     # Preprocess and extract radiomic 2D feature map
     img_array, radiomic_feature_map = preprocess_image(temp_image_path)
 
@@ -584,7 +676,8 @@ async def gemini_assessment(
     try:
         _ = await _run_pyradiomics(nrrd_image_filename, nrrd_mask_filename, out_csv_name, out_dir_name)
     except Exception as e:
-        return {"error": f"Failed to run pyradiomics: {e}"}
+        return {"error": f"Failed to run pyradiomics: {e}",
+                "status":"error"}
 
     # Reference the radiomics output directory for downstream use
     radiomic_features = f"/images/{out_dir_name}"
@@ -592,31 +685,77 @@ async def gemini_assessment(
     # Send GradCAM overlay to Gemini for AI explanation
     gemini_response = await get_gemini_explanation(overlay_path)
     explanation = gemini_response.get("explanation", "No explanation available")
+    # explanation = "test"
     print(f"Gemini explanation: {explanation}")
-    print("gemini response", gemini_response)
+    # print("gemini response", gemini_response)
+    print("patientId", patient_id)
     # Prepare FHIR object
-    # observation = prepare_fhir_observation(probability, f"/images/{overlay_filename}", radiomic_features, explanation)
+    observation = prepare_fhir_observation(probability, f"/images/{overlay_filename}", radiomic_features, explanation, patient_ref=f"Patient/{patient_id or 'example'}")
 
     # Post to FHIR
     timeout = httpx.Timeout(300.0)
-    # async with httpx.AsyncClient(timeout=timeout) as client:
-    #     response = await client.post(f"{FHIR_URL}/Observation", json=observation)
-    #     if response.status_code not in (200, 201):
-    #         return {"error": "Failed to create observation", "details": response.text}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(f"{FHIR_URL}/Observation", json=observation)
+        if response.status_code not in (200, 201):
+            return {"error": "Failed to create observation", "status": "error"}
 
     # Clean up
-    print("What iam cleaning up", temp_image_path, nrrd_image_path, nrrd_mask_path, out_csv_name)
-    _cleanup_paths(temp_image_path, nrrd_image_path, nrrd_mask_path, out_csv_name)
-
-    return {
+    print("What iam cleaning up", temp_image_path, nrrd_image_path, nrrd_mask_path, "/app/images/"+out_csv_name,"/app"+radiomic_features)
+    _cleanup_paths(temp_image_path, nrrd_image_path, nrrd_mask_path, "/app/images/"+out_csv_name,"/app"+radiomic_features)
+    print({
         "probability": probability,
         "gradcam_path": f"/images/{overlay_filename}",
         "radiomic_features": radiomic_features,
         # include radiomic_feature_map info so the variable is used and visible in responses
         "radiomic_feature_map_shape": getattr(radiomic_feature_map, "shape", None),
-        "gemini_explanation": explanation,
-        # "fhir_observation_id": response.json().get("id")
+        "gemini_explanation": explanation
+    })
+    
+    return {
+        "status": "success",
+        "result": response.json(),
     }
+    
+@app.post("/assessments")
+async def getPatientAssessments(patient_id: str = Body(...)) -> dict:
+    """Fetch all Observations for a given patient from FHIR server.
+    """
+    timeout = httpx.Timeout(300.0)
+    all_observations = []
+    next_url = f"{FHIR_URL}/Observation?subject=Patient/{patient_id}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            while next_url:
+                response = await client.get(next_url)
+                if response.status_code != 200:
+                    return {"error": f"Failed to fetch observations for patient {patient_id}", "status": "error"}
+                data = response.json()
+                # Flatten observations from 'entry' list
+                if "entry" in data:
+                    entries = data["entry"]
+                    for entry in entries:
+                        if "resource" in entry:
+                            all_observations.append(entry["resource"])
+                # Find the 'next' link for pagination
+                next_url = None
+                links = data.get("link", [])
+                for link in links:
+                    if link.get("relation") == "next":
+                        next_url = link.get("url")
+                        break
+    except Exception as e:
+        return {"error": f"Failed to fetch observations: {e}"}
+    return {"observations": all_observations}
+        
+    # return {
+    #     "probability": probability,
+    #     "gradcam_path": f"/images/{overlay_filename}",
+    #     "radiomic_features": radiomic_features,
+    #     # include radiomic_feature_map info so the variable is used and visible in responses
+    #     "radiomic_feature_map_shape": getattr(radiomic_feature_map, "shape", None),
+    #     "gemini_explanation": explanation,
+    #     # "fhir_observation_id": response.json().get("id")
+    # }
 
 
 # (removed endpoint; radiomics batch execution is now part of gemini_assessment pipeline)
